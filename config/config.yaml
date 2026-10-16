@@ -1,0 +1,84 @@
+# Feature contract (LOCKED). Change here, not in code.
+# Every stage (training, dbt, scoring, monitoring) must read these same definitions.
+
+paths:
+  raw: data/raw/FreddieMac.csv
+  artifacts: artifacts
+
+target:
+  primary: serious_delinquency      # MonthsDelinquent >= serious_months
+  secondary: ever_delinquent        # MonthsDelinquent >= 1 (sensitivity check)
+  serious_months: 3
+
+# Model inputs: all known at approval time.
+features:
+  numeric:
+    - CreditScore
+    - DTI
+    - LTV
+    - OrigUPB
+    - OrigInterestRate
+    - MIP
+    - Units
+  categorical:
+    - FirstTimeHomebuyer
+    - Occupancy
+    - Channel
+    - PPM
+    - PropertyType
+    - LoanPurpose
+    - NumBorrowers
+  # Derived in features.py (and later in dbt) identically for real and simulated rows
+  derived:
+    - cs_unknown        # CreditScore was 0 (unknown)
+    - dti_unknown       # DTI was 0 (unknown / not recorded)
+    - ltv_gt80          # LTV above 80 (mortgage insurance territory)
+
+# Used for monitoring and fairness segments only. NEVER model inputs.
+segments:
+  - PropertyState
+  - MSA
+  - SellerName
+  - vintage_quarter
+
+# Guard: training fails if any of these ever appear among model inputs.
+forbidden_features:
+  - MonthsDelinquent      # outcome
+  - MonthsInRepayment     # observation window = leakage
+  - EverDelinquent        # outcome
+  - ServicerName          # assigned after origination
+  - OCLTV                 # duplicate of LTV (corr 1.00)
+  - ProductType           # constant
+  - OrigLoanTerm          # 99% constant
+  - PostalCode            # fair-lending proxy
+  - PropertyState         # fair-lending proxy, segment only
+  - MSA
+  - SellerName
+
+# Raw "unknown" conventions found in the Freddie Mac file
+cleaning:
+  unknown_code: "X"
+  zero_means_unknown: [CreditScore, DTI]
+
+woe:
+  max_bins: 8
+  min_bin_pct: 0.05         # every bin holds at least 5% of loans
+  min_iv: 0.02              # drop features with IV below this
+  max_corr: 0.70            # drop the weaker of two WOE features correlated above this
+  monotonic_numeric: true   # enforce a monotone trend for numeric variables
+
+scorecard:
+  base_score: 600
+  base_odds: 50             # good:bad odds at base_score
+  pdo: 20                   # points to double the odds
+
+risk_bands:                 # share of TRAIN population, riskiest first
+  - {name: "E - Very High", upper_pct: 10}
+  - {name: "D - High",      upper_pct: 30}
+  - {name: "C - Medium",    upper_pct: 60}
+  - {name: "B - Low",       upper_pct: 90}
+  - {name: "A - Very Low",  upper_pct: 100}
+
+split:
+  test_size: 0.30
+  random_state: 42

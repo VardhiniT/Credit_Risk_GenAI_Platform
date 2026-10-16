@@ -1,0 +1,24 @@
+# data never goes to GitHub
+data/raw/*
+data/sim/*
+!data/raw/.gitkeep
+!data/sim/.gitkeep
+
+# secrets
+.env
+*.pem
+profiles.yml
+
+# model binaries and run output (regenerate with the training script)
+*.pkl
+*.joblib
+artifacts/*
+!artifacts/.gitkeep
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
