@@ -8,3 +8,5 @@ pytest
 ipykernel
 matplotlib
 seaborn
+snowflake-connector-python[pandas]
+python-dotenv
