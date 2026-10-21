@@ -7,7 +7,6 @@ data/sim/*
 # secrets
 .env
 *.pem
-profiles.yml
 
 # model binaries and run output (regenerate with the training script)
 *.pkl
@@ -22,3 +21,8 @@ __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
 .DS_Store
+
+# dbt output
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/

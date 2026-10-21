@@ -13,4 +13,17 @@ train-ever:
 simulate:
 	python scripts/simulate_batches.py --real $(RAW)
 
-.PHONY: test train train-ever simulate
+# dbt reads Snowflake settings from .env (never committed)
+DBT = set -a; [ -f .env ] && . ./.env; set +a; dbt
+DBTARGS = --project-dir dbt --profiles-dir dbt
+
+dbt-run:
+	$(DBT) run $(DBTARGS)
+
+dbt-test:
+	$(DBT) test $(DBTARGS)
+
+parity:
+	python scripts/parity_check.py
+
+.PHONY: test train train-ever simulate dbt-run dbt-test parity

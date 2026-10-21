@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: raw
+    database: CREDIT_RISK
+    schema: RAW
+    tables:
+      - name: loans_real
+        description: "Untouched Freddie Mac file as loaded by scripts/load_raw.py (all text)."

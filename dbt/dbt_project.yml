@@ -1,0 +1,14 @@
+name: credit_risk
+version: "1.0.0"
+config-version: 2
+profile: credit_risk
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+
+models:
+  credit_risk:
+    staging:
+      +schema: STAGING
+      +materialized: table

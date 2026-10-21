@@ -1,0 +1,27 @@
+version: 2
+
+models:
+  - name: stg_loans
+    description: "Cleaned loans, one row per loan. Same rules as data.py."
+    columns:
+      - name: loan_seq_num
+        tests: [unique, not_null]
+      - name: serious_delinquency
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+      - name: occupancy
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["O", "I", "S", "UNKNOWN"]
+      - name: channel
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["R", "B", "C", "T", "UNKNOWN"]
+      - name: property_type
+        tests:
+          - not_null
