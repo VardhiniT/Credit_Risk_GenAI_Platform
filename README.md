@@ -16,29 +16,6 @@ and a governed GenAI assistant that explains scores, runs what-if scenarios and 
   Because drift is injected by design, monitoring on it proves the machinery works; it is not drift observed in the real world.
 - Real and simulated rows go through the same cleaning code (`src/credit_risk/data.py`).
 
-
-### Loans come from the dataset, not from the LLM
-
-Ask about a loan by its ID (`why is loan F199Q1334467 risky?`), say `a random loan`, or compare two IDs. `LoanStore` reads
-the row from the loan file and keeps only the approved model inputs, so postal code, seller, servicer and location never reach
-the assistant. The recorded outcome (months delinquent) is shown next to the score for context. Loans that are not in the
-dataset can be typed in by hand. Income is not in the dataset; tell the assistant `income is 90000` before an income what-if.
-Run `make chat-data` to chat with no preloaded loan.
-
-### How a what-if question is processed
-
-Any amount, percentage or direction in the question is interpreted, not matched against fixed examples:
-
-1. **Interpret.** Claude (when `ANTHROPIC_API_KEY` is set) turns the sentence into a structured list `{field, op, value}`
-   where `op` is `pct` (relative %), `add` (signed absolute change) or `set` (new level). A rule-based parser is used only when no key is set, or when you start the chat with `--fallback`.
-   With a key set, an unusable Claude reply is retried once and then the user is asked to rephrase; the program never
-   silently switches to rules. Run `make llm-check` to test the connection.
-2. **Validate.** Fields must be approved model inputs and values inside the ranges the model was built on.
-3. **Compute the modified record.** `apply_changes` applies the schema to the loan (income change recalculates DTI,
-   property value change recalculates LTV).
-4. **Score.** The modified record goes through the same scorecard: score, band, PD, reasons, change vs the base loan.
-5. **Word it.** Only the computed facts go to the response writer, and every number in the answer is checked against them.
-
 ## Quick start
 
 ```bash
@@ -53,9 +30,11 @@ make simulate    # 24 monthly simulated batches + outcomes
 make baseline    # freeze the monitoring baseline from the real data
 make monitor     # PSI, AUC/KS and calibration for every simulated batch -> monitoring/
 make report      # markdown monitoring report -> reports/monitoring_report.md
-make ask Q="Why is this loan risky?"   # ask the GenAI assistant about examples/loan_example.json
-make chat        # interactive assistant
-make loan-note   # one-loan note -> reports/
+make llm-check   # test the Claude connection (needs ANTHROPIC_API_KEY)
+make chat-data   # interactive assistant: name any loan ID from the dataset
+make chat        # interactive assistant with two example loans preloaded
+make ask Q="What would it take to reach band B?"   # one question about examples/loan_example.json
+make loan-note   # one-loan note -> reports/ (the notes are git-ignored)
 ```
 
 (`make` just sets `PYTHONPATH=src`; the underlying commands are in the Makefile.)
@@ -116,14 +95,16 @@ so this shows the monitoring machinery works; it is not drift observed in a real
 model-risk teams (is the model still reliable?), and anyone who needs a short, auditable note on a loan.
 It never makes or recommends a lending decision.
 
-`python -m credit_risk.genai.chat --loan examples/loan_example.json` starts a conversation. You can also type a loan
-in plain text ("credit score 700, DTI 30, LTV 80, loan 200k, rate 7") or load a second loan for comparisons.
+**Start it:** `make chat-data`, then name a loan from the dataset (`why is loan F199Q1178517 risky?`). Later questions
+("what if the house is worth a fifth less and the rate is 75 bps higher?") refer to that loan without repeating the ID.
+Say `a random loan` for any loan, or name two IDs to compare. Loans that are not in the dataset can be typed in or loaded
+from a JSON file. Set `ANTHROPIC_API_KEY` so Claude reads the questions; without a key a basic rule-based reader is used.
 
 | You ask | What it does |
 |---|---|
-| "Why is this loan risky?" | Score, probability of serious delinquency, risk band and that band's observed bad rate, top three reasons with the loan's value next to the portfolio median |
-| "What if the loan is 10% higher / income down 50k / house prices fall 15% / downturn?" | Re-scores the loan. Loan amount and property value move LTV; an income change moves DTI (assumptions are stated). Follow-ups such as "and also DTI down 5" build on the previous scenario |
-| "What would it take to reach band B?" | For credit score, LTV and DTI separately, the smallest change that reaches the goal (also by score or by PD), the points still needed, and the equivalent down payment for LTV |
+| "Why is loan F199Q1178517 risky?" | Reads the loan from the dataset, then gives the score, probability of serious delinquency, risk band and that band's observed bad rate, top three reasons with the loan's value next to the portfolio median, and the outcome recorded in the data |
+| "What if the house is worth a fifth less and the rate is 75 bps higher?" (any amounts, percentages or directions) | Claude turns the sentence into a structured change, the code builds the modified loan record, and the scorecard re-scores it (see below). Follow-ups such as "and also DTI down 5" build on the previous scenario |
+| "What would it take to reach band B?" | For credit score, LTV and DTI separately, the smallest change that reaches the goal (also by score or by PD), the points still needed, and the equivalent down payment for LTV. For a loan with no recorded credit score, it reports the score that would be needed |
 | "Compare loan A and loan B" | Scores, bands and the factors that explain the gap |
 | "Is the model drifting? How good is it?" | Latest PSI, largest feature shifts, AUC versus baseline, calibration, from the monitoring tables |
 | "What is PSI?" / "What are the limitations?" | Reviewed documentation text with numbers from the config and baseline |
@@ -133,10 +114,32 @@ in plain text ("credit score 700, DTI 30, LTV 80, loan 200k, rate 7") or load a 
 | Prompt-injection attempts, off-topic chat | Declined gently with suggestions of what to ask |
 | "Thanks, bye" | Ends with a summary of what was covered |
 
-**How it decides:** every message passes a cheap regex guard first (injection, protected attributes, approve/decline or
-legal advice), so those never reach an LLM. Intent detection then uses Claude when `ANTHROPIC_API_KEY` is set and
-simple rules otherwise; the LLM's answer (intent, scenario changes, target, loan fields) is validated, and anything
-invalid falls back to the rules.
+### How a what-if question is processed
+
+Any amount, percentage or direction in the question is interpreted; nothing is matched against fixed examples.
+
+1. **Interpret.** Claude turns the sentence into a structured list `{field, op, value}` where `op` is `pct` (relative %),
+   `add` (signed absolute change) or `set` (new level). Words such as "a fifth", "doubles", "75 bps" or "cut by a third" are converted to numbers.
+2. **Validate.** Fields must be approved model inputs and values must be inside the ranges the model was built on.
+3. **Compute the modified record.** The code applies the changes to the loan: an income change rescales DTI, a property
+   value change recalculates LTV, and an explicit DTI change is applied on top of the income effect.
+4. **Score.** The modified record goes through the same scorecard: score, band, probability, reasons and the change from the base loan.
+5. **Word it.** Only the computed facts go to the response writer, and every number in the answer is checked against them.
+
+### Loans come from the dataset, not from the LLM
+
+`LoanStore` reads the row for a loan ID from the loan file and keeps only the approved model inputs, so postal code,
+seller, servicer and location never reach the assistant. An unknown ID is refused, never guessed. A credit score or DTI
+recorded as 0 is treated as unknown, exactly as in training (the scorecard has an explicit flag for it). Income is not in
+the dataset: say `income is 90000` before an income what-if.
+
+### How it decides
+
+Every message passes a regex guard first (injection, protected attributes, approve/decline or legal advice), so those never
+reach an LLM. With `ANTHROPIC_API_KEY` set, Claude then works out the intent and extracts the scenario changes, target and
+loan details. Its reply is validated; an unusable reply is retried once, and if it is still unusable the user is asked to
+rephrase. The program never silently switches to rules after a Claude failure (start with `--fallback` to allow that).
+Run `make llm-check` to test the connection.
 
 **The LLM never calculates.** Scores, scenarios, goal seeking, comparisons and PSI come from the scorecard and the
 monitoring tables (`genai/tools.py`). The LLM only words the result.
@@ -145,15 +148,16 @@ monitoring tables (`genai/tools.py`). The LLM only words the result.
 - Only the 14 model inputs (plus annual income as a scenario helper, never fed to the model) are accepted, in valid ranges.
   Names, addresses, postal codes and unknown fields are rejected.
 - Every number in an explanation must exist in the facts it was given; approve/decline language is blocked.
-  A failed check, an LLM error or a malformed route falls back to a fixed template.
-- Scenarios whose result is outside the model's range (for example a DTI of 94) are explained, not scored.
+  If Claude's wording is empty, cut off or fails a check, a fixed template is used instead and the reason is shown.
+- Scenarios whose result is outside the model's range (for example an LTV of 156) are explained, not scored.
 - Loan answers end with a not-a-credit-decision notice.
-- Every request is appended to `logs/genai_audit.jsonl` (route, facts, answer, source, checks).
+- Every request is appended to `logs/genai_audit.jsonl` (route, facts, answer, source, checks, loan ID).
 
 **Reports:** `make report` writes a monitoring report for the model-risk team (summary, actions, thresholds, tables).
 `make loan-note` writes a one-loan note (summary, reasons, six standard scenarios, what it would take, model reliability caveat).
 
-Tested without a network by faking the LLM (`tests/test_genai.py`).
+Tested without a network by faking the LLM (`tests/test_genai.py`, `tests/test_llm_client.py`). The live Claude path was
+checked by hand with `make llm-check` and `make chat-data`.
 
 ## Known limitations
 
@@ -163,7 +167,9 @@ Tested without a network by faking the LLM (`tests/test_genai.py`).
 - Fairness metrics by segment are planned but not yet computed.
 - Monitoring uses simulated drift, and the baseline AUC comes from a random split of one vintage.
 - What-if and goal-seek results are the scorecard's view. Scorecard inputs are binned, so small changes inside a bin do not move the score. Stress scenarios are illustrative assumptions.
-- LLM mode needs an API key; in fallback mode answers come from fixed templates.
+- The assistant is a command-line tool, not a service: no API, user accounts or role-based access, and the audit log is a local file that does not record the model version.
+- Claude mode needs an API key and costs a small amount per question; without a key a basic rule-based reader and fixed templates are used. Claude's wording can occasionally be replaced by the fixed template when it fails the checks.
+- The loan lookup reads the local loan file; a production version would query the warehouse.
 
 ## Layout
 
