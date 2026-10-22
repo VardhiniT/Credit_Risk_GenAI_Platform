@@ -1,10 +1,11 @@
 # Credit Risk Platform
 
 A mortgage credit-risk scorecard built the way a lender would run it: cleaned data, a documented
-feature contract, an explainable WOE scorecard, and (coming next) a Snowflake + dbt + Airflow
-pipeline, monitoring, and a governed GenAI explanation layer.
+feature contract, an explainable WOE scorecard, model monitoring (PSI, AUC/KS, calibration, alerts),
+and a governed GenAI assistant that explains scores, runs what-if scenarios and reports on drift.
 
-**Status: Workstream A (model) done. B (Snowflake/dbt/Airflow), C (monitoring), D (GenAI) next.**
+**Status:** model, monitoring and GenAI layer are done and tested. The Snowflake + dbt pipeline is partly built
+(raw load and staging models pass their tests); Airflow orchestration, a Streamlit dashboard and a cloud landing zone are next.
 
 ## Data (read this first)
 
@@ -14,6 +15,29 @@ pipeline, monitoring, and a governed GenAI explanation layer.
   (`scripts/simulate_batches.py`). Used only to test the pipeline and monitoring, never to train.
   Because drift is injected by design, monitoring on it proves the machinery works; it is not drift observed in the real world.
 - Real and simulated rows go through the same cleaning code (`src/credit_risk/data.py`).
+
+
+### Loans come from the dataset, not from the LLM
+
+Ask about a loan by its ID (`why is loan F199Q1334467 risky?`), say `a random loan`, or compare two IDs. `LoanStore` reads
+the row from the loan file and keeps only the approved model inputs, so postal code, seller, servicer and location never reach
+the assistant. The recorded outcome (months delinquent) is shown next to the score for context. Loans that are not in the
+dataset can be typed in by hand. Income is not in the dataset; tell the assistant `income is 90000` before an income what-if.
+Run `make chat-data` to chat with no preloaded loan.
+
+### How a what-if question is processed
+
+Any amount, percentage or direction in the question is interpreted, not matched against fixed examples:
+
+1. **Interpret.** Claude (when `ANTHROPIC_API_KEY` is set) turns the sentence into a structured list `{field, op, value}`
+   where `op` is `pct` (relative %), `add` (signed absolute change) or `set` (new level). A rule-based parser is used only when no key is set, or when you start the chat with `--fallback`.
+   With a key set, an unusable Claude reply is retried once and then the user is asked to rephrase; the program never
+   silently switches to rules. Run `make llm-check` to test the connection.
+2. **Validate.** Fields must be approved model inputs and values inside the ranges the model was built on.
+3. **Compute the modified record.** `apply_changes` applies the schema to the loan (income change recalculates DTI,
+   property value change recalculates LTV).
+4. **Score.** The modified record goes through the same scorecard: score, band, PD, reasons, change vs the base loan.
+5. **Word it.** Only the computed facts go to the response writer, and every number in the answer is checked against them.
 
 ## Quick start
 
@@ -26,6 +50,12 @@ make test        # unit tests
 make train       # primary target: 3+ months delinquent
 make train-ever  # sensitivity check: any delinquency
 make simulate    # 24 monthly simulated batches + outcomes
+make baseline    # freeze the monitoring baseline from the real data
+make monitor     # PSI, AUC/KS and calibration for every simulated batch -> monitoring/
+make report      # markdown monitoring report -> reports/monitoring_report.md
+make ask Q="Why is this loan risky?"   # ask the GenAI assistant about examples/loan_example.json
+make chat        # interactive assistant
+make loan-note   # one-loan note -> reports/
 ```
 
 (`make` just sets `PYTHONPATH=src`; the underlying commands are in the Makefile.)
@@ -64,20 +94,86 @@ a leakage variable. See `notebooks/` for the original exploration.
 4. `evaluate.py`: AUC, Gini, KS, Brier, decile calibration, band table, PSI.
 5. `train.py`: runs the above, saves artifacts and an auto-generated model card.
 
+## Monitoring
+
+Every new batch of loans is checked three ways (`src/credit_risk/monitor.py`):
+
+| Question | Measure | Alert rule |
+|---|---|---|
+| Did the inputs change? | PSI of the score and of every feature versus the development data | 0.10 watch, 0.25 alert |
+| Did the model stop ranking well? | AUC and KS on loans whose outcome is known, versus the baseline | AUC drop 0.02 watch, 0.05 alert |
+| Is it still honest? | Actual bad rate divided by average predicted PD | more than 15% off watch, 30% alert |
+
+The bin edges and shares from the development data are frozen once in `artifacts/<target>/baseline.json`
+(`make baseline`), so monitoring never needs the raw training file. `make monitor` writes
+`monitoring/batch_monitoring.csv`, `feature_psi.csv`, `alerts.json` and `monitoring_trend.png`.
+Thresholds live in `config/config.yaml`. The monthly batches are simulated with controlled drift (see Data),
+so this shows the monitoring machinery works; it is not drift observed in a real portfolio.
+
+## GenAI assistant (governed)
+
+**Who it is for:** credit analysts and underwriting support (explain a loan, test scenarios), portfolio and
+model-risk teams (is the model still reliable?), and anyone who needs a short, auditable note on a loan.
+It never makes or recommends a lending decision.
+
+`python -m credit_risk.genai.chat --loan examples/loan_example.json` starts a conversation. You can also type a loan
+in plain text ("credit score 700, DTI 30, LTV 80, loan 200k, rate 7") or load a second loan for comparisons.
+
+| You ask | What it does |
+|---|---|
+| "Why is this loan risky?" | Score, probability of serious delinquency, risk band and that band's observed bad rate, top three reasons with the loan's value next to the portfolio median |
+| "What if the loan is 10% higher / income down 50k / house prices fall 15% / downturn?" | Re-scores the loan. Loan amount and property value move LTV; an income change moves DTI (assumptions are stated). Follow-ups such as "and also DTI down 5" build on the previous scenario |
+| "What would it take to reach band B?" | For credit score, LTV and DTI separately, the smallest change that reaches the goal (also by score or by PD), the points still needed, and the equivalent down payment for LTV |
+| "Compare loan A and loan B" | Scores, bands and the factors that explain the gap |
+| "Is the model drifting? How good is it?" | Latest PSI, largest feature shifts, AUC versus baseline, calibration, from the monitoring tables |
+| "What is PSI?" / "What are the limitations?" | Reviewed documentation text with numbers from the config and baseline |
+| "Write a note on this loan" | A markdown loan note (`reports/loan_note_*.md`) |
+| "Should I approve this?", legal questions | Politely declined, with what the model does show; legal questions go to compliance |
+| Race, age, ZIP code, personal data | Declined: these are not model inputs and are never used |
+| Prompt-injection attempts, off-topic chat | Declined gently with suggestions of what to ask |
+| "Thanks, bye" | Ends with a summary of what was covered |
+
+**How it decides:** every message passes a cheap regex guard first (injection, protected attributes, approve/decline or
+legal advice), so those never reach an LLM. Intent detection then uses Claude when `ANTHROPIC_API_KEY` is set and
+simple rules otherwise; the LLM's answer (intent, scenario changes, target, loan fields) is validated, and anything
+invalid falls back to the rules.
+
+**The LLM never calculates.** Scores, scenarios, goal seeking, comparisons and PSI come from the scorecard and the
+monitoring tables (`genai/tools.py`). The LLM only words the result.
+
+**Governance, each covered by a test:**
+- Only the 14 model inputs (plus annual income as a scenario helper, never fed to the model) are accepted, in valid ranges.
+  Names, addresses, postal codes and unknown fields are rejected.
+- Every number in an explanation must exist in the facts it was given; approve/decline language is blocked.
+  A failed check, an LLM error or a malformed route falls back to a fixed template.
+- Scenarios whose result is outside the model's range (for example a DTI of 94) are explained, not scored.
+- Loan answers end with a not-a-credit-decision notice.
+- Every request is appended to `logs/genai_audit.jsonl` (route, facts, answer, source, checks).
+
+**Reports:** `make report` writes a monitoring report for the model-risk team (summary, actions, thresholds, tables).
+`make loan-note` writes a one-loan note (summary, reasons, six standard scenarios, what it would take, model reliability caveat).
+
+Tested without a network by faking the LLM (`tests/test_genai.py`).
+
 ## Known limitations
 
 - Single vintage: no out-of-time validation on real data.
 - `MonthsDelinquent` is a count of late months, not a fixed-window "90+ days within 24 months" flag. Freddie Mac's monthly performance files would allow a proper one.
 - No income, employment, bureau or macroeconomic variables in the dataset; none were invented.
 - Fairness metrics by segment are planned but not yet computed.
+- Monitoring uses simulated drift, and the baseline AUC comes from a random split of one vintage.
+- What-if and goal-seek results are the scorecard's view. Scorecard inputs are binned, so small changes inside a bin do not move the score. Stress scenarios are illustrative assumptions.
+- LLM mode needs an API key; in fallback mode answers come from fixed templates.
 
 ## Layout
 
 ```
 config/config.yaml        feature contract and parameters
-src/credit_risk/          data, woe, scorecard, evaluate, train
-scripts/                  simulate_batches.py
-tests/                    33 unit and data-integrity tests
+src/credit_risk/          data, woe, scorecard, evaluate, train, monitor
+src/credit_risk/genai/    tools, agent (routing), governance, llm, report, chat
+scripts/                  simulate_batches, build_baseline, run_monitoring, loaders
+tests/                    unit and data-integrity tests, monitoring and GenAI tests
+examples/                 sample loan for the assistant
 artifacts/                trained model, tables, model card (regenerated by training)
 notebooks/                original exploration (kept for reference)
 ```

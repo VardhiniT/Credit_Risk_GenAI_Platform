@@ -1,0 +1,17 @@
+{
+  "CreditScore": 640,
+  "DTI": 42,
+  "LTV": 92,
+  "OrigUPB": 185000,
+  "OrigInterestRate": 7.5,
+  "MIP": 25,
+  "Units": 1,
+  "FirstTimeHomebuyer": "Y",
+  "Occupancy": "O",
+  "Channel": "R",
+  "PPM": "N",
+  "PropertyType": "SF",
+  "LoanPurpose": "P",
+  "NumBorrowers": "1",
+  "annual_income": 90000
+}

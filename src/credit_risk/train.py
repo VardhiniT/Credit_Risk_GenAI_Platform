@@ -19,19 +19,22 @@ from . import data
 from .config import load_config, model_inputs
 from .evaluate import band_table, decile_table, is_monotone_decreasing_risk, ranking_metrics
 from .scorecard import Scorecard
+from .scorecard_sp import SPScorecard
+
+ENGINES = {"own": Scorecard, "scorecardpy": SPScorecard}
 
 
-def cross_val_auc(df, y, cfg, folds=5):
+def cross_val_auc(df, y, cfg, folds=5, engine="own"):
     """Refit binning AND model inside every fold, so binning never sees the validation part."""
     cols = model_inputs(cfg)
     aucs = []
     for tr, va in StratifiedKFold(folds, shuffle=True, random_state=cfg["split"]["random_state"]).split(df, y):
-        sc = Scorecard(cfg).fit(df.iloc[tr][cols], y[tr])
+        sc = ENGINES[engine](cfg).fit(df.iloc[tr][cols], y[tr])
         aucs.append(ranking_metrics(y[va], sc.predict_pd(df.iloc[va][cols]))["auc"])
     return [float(a) for a in aucs]
 
 
-def run(raw_path, cfg, target_key="primary", out_root=None, cv_folds=5):
+def run(raw_path, cfg, target_key="primary", out_root=None, cv_folds=5, engine="own"):
     target = cfg["target"][target_key]
     df = data.prepare(data.load_raw(raw_path), cfg)
     y = df[target].to_numpy()
@@ -41,14 +44,14 @@ def run(raw_path, cfg, target_key="primary", out_root=None, cv_folds=5):
         df[cols], y, test_size=cfg["split"]["test_size"],
         random_state=cfg["split"]["random_state"], stratify=y)
 
-    sc = Scorecard(cfg).fit(X_tr, y_tr)
+    sc = ENGINES[engine](cfg).fit(X_tr, y_tr)
 
     pd_tr, pd_te = sc.predict_pd(X_tr), sc.predict_pd(X_te)
     s_tr, s_te = sc.score(X_tr), sc.score(X_te)
-    metrics = {"target": target, "rows": int(len(df)),
+    metrics = {"target": target, "engine": engine, "rows": int(len(df)),
                "train": ranking_metrics(y_tr, pd_tr), "test": ranking_metrics(y_te, pd_te)}
     if cv_folds:
-        cv = cross_val_auc(df, y, cfg, cv_folds)
+        cv = cross_val_auc(df, y, cfg, cv_folds, engine)
         metrics["cv_auc"] = {"folds": cv, "mean": float(np.mean(cv)), "std": float(np.std(cv))}
 
     deciles = decile_table(y_te, pd_te)
@@ -60,12 +63,12 @@ def run(raw_path, cfg, target_key="primary", out_root=None, cv_folds=5):
     metrics["band_cutoffs"] = sc.band_cutoffs_
     metrics["max_calibration_gap_decile"] = float((deciles["mean_pd"] - deciles["actual_rate"]).abs().max())
 
-    out = Path(out_root or cfg["paths"]["artifacts"]) / target
+    out = Path(out_root or cfg["paths"]["artifacts"]) / (target if engine == "own" else f"{target}_{engine}")
     out.mkdir(parents=True, exist_ok=True)
     sc.save(out / "scorecard.joblib")
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
-    sc.binner.iv_table().to_csv(out / "iv_table.csv", index=False)
-    sc.binner.bins_table().to_csv(out / "woe_bins.csv", index=False)
+    sc.iv_table().to_csv(out / "iv_table.csv", index=False)
+    sc.bins_table().to_csv(out / "woe_bins.csv", index=False)
     sc.coef_table().to_csv(out / "coefficients.csv", index=False)
     sc.points_table().to_csv(out / "points.csv", index=False)
     deciles.to_csv(out / "deciles_test.csv", index=False)
@@ -97,8 +100,8 @@ Real Freddie Mac loans, single origination vintage (Q1 1999), {m['rows']:,} loan
 ({int(cfg['split']['test_size']*100)}% test). Simulated batches are used only to test the pipeline and monitoring, never to train.
 
 ## Method
-WOE binning (monotone trend for numeric variables, min bin {cfg['woe']['min_bin_pct']:.0%}), IV filter >= {cfg['woe']['min_iv']},
-correlation filter, unpenalised logistic regression, sign check (all coefficients must agree with WOE direction).
+Engine: `{m.get('engine', 'own')}`. {getattr(sc, 'method_text', '')}
+Minimum bin share {cfg['woe']['min_bin_pct']:.0%}, IV filter >= {cfg['woe']['min_iv']}, correlation filter {cfg['woe']['max_corr']}.
 Score = offset + factor * ln((1-PD)/PD); base {cfg['scorecard']['base_score']} points at {cfg['scorecard']['base_odds']}:1 odds, PDO {cfg['scorecard']['pdo']}.
 
 ## Performance
@@ -136,11 +139,13 @@ def main():
     ap.add_argument("--target", choices=["primary", "secondary"], default="primary")
     ap.add_argument("--out", default=None)
     ap.add_argument("--cv", type=int, default=5, help="CV folds, 0 to skip")
+    ap.add_argument("--engine", choices=list(ENGINES), default="own",
+                    help="own = our WOE code, scorecardpy = the scorecardpy library")
     a = ap.parse_args()
     cfg = load_config(a.config)
-    sc, m, deciles, bands, out = run(a.raw or cfg["paths"]["raw"], cfg, a.target, a.out, a.cv)
+    sc, m, deciles, bands, out = run(a.raw or cfg["paths"]["raw"], cfg, a.target, a.out, a.cv, a.engine)
     pd.set_option("display.width", 200)
-    print(f"Target: {m['target']}   rows: {m['rows']:,}")
+    print(f"Target: {m['target']}   engine: {m['engine']}   rows: {m['rows']:,}")
     for k in ("train", "test"):
         r = m[k]
         print(f"{k:5s} AUC {r['auc']:.3f}  Gini {r['gini']:.3f}  KS {r['ks']:.3f}  bad rate {r['bad_rate']:.3f}  mean PD {r['mean_pd']:.3f}")

@@ -138,6 +138,18 @@ class Scorecard:
     def load(path):
         return joblib.load(path)
 
+    def iv_table(self):
+        return self.binner.iv_table()
+
+    def bins_table(self):
+        return self.binner.bins_table()
+
+    method_text = (
+        "WOE binning written from scratch (monotone trend for numeric variables, min bin share from the "
+        "config), IV filter, correlation filter, unpenalised logistic regression, sign check "
+        "(all coefficients must be negative under our WOE convention)."
+    )
+
     def coef_table(self):
         t = pd.DataFrame({"feature": self.selected_, "coef": self.model_.coef_[0],
                           "iv": [self.binner.iv_[c] for c in self.selected_]})

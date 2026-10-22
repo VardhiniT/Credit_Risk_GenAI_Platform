@@ -82,3 +82,14 @@ risk_bands:                 # share of TRAIN population, riskiest first
 split:
   test_size: 0.30
   random_state: 42
+
+# Monitoring thresholds (industry rules of thumb; PSI < 0.10 stable, 0.10-0.25 watch, > 0.25 alert)
+monitoring:
+  psi_watch: 0.10
+  psi_alert: 0.25
+  auc_drop_watch: 0.02      # fall versus the baseline AUC
+  auc_drop_alert: 0.05
+  calib_watch: 0.15         # |actual bad rate / predicted PD - 1|
+  calib_alert: 0.30
+  min_batch_loans: 1000     # smaller batches are too noisy to judge
+  min_bads_for_auc: 100     # AUC needs enough bad loans in the batch

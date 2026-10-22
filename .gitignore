@@ -26,3 +26,7 @@ __pycache__/
 dbt/target/
 dbt/logs/
 dbt/dbt_packages/
+monitoring/*.csv
+monitoring/*.json
+logs/
+reports/loan_note_*.md
